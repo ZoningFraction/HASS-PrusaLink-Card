@@ -1,0 +1,185 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>prusalink-printer-card browser harness</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
+<style>
+  :root {
+    --card-background-color: #1c1c1c; --primary-text-color: #e1e1e1; --secondary-text-color: #9b9b9b;
+    --secondary-background-color: #282828; --divider-color: rgba(225,225,225,.12);
+    --disabled-text-color: #6f6f6f; --state-icon-color: #9b9b9b;
+    --success-color: #43a047; --warning-color: #ffa600; --info-color: #039be5; --error-color: #db4437;
+  }
+  body { background: #111; color: #ddd; font: 14px system-ui, sans-serif; margin: 16px; }
+  #wrap { width: 460px; }
+  #controls { margin: 8px 0 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+  #controls button { background: #333; color: #ddd; border: 1px solid #555; border-radius: 6px; padding: 4px 8px; }
+</style>
+<div id="controls"></div>
+<div id="wrap"></div>
+<pre id="log" style="font-size:12px;color:#9c9"></pre>
+<script type="module">
+  customElements.define("ha-card", class extends HTMLElement {
+    connectedCallback() {
+      this.style.cssText = "display:block;background:var(--card-background-color);color:var(--primary-text-color);border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.4)";
+    }
+  });
+  customElements.define("ha-icon", class extends HTMLElement {
+    static observedAttributes = ["icon"];
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" }).innerHTML =
+        `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
+         <style>:host{display:inline-flex;line-height:1} span{font-size:var(--mdc-icon-size,24px)}</style><span></span>`;
+    }
+    attributeChangedCallback() {
+      const name = (this.getAttribute("icon") || "").replace(/^mdi:/, "");
+      this.shadowRoot.querySelector("span").className = `mdi mdi-${name}`;
+    }
+  });
+  window.__stream = { connected: 0, disconnected: 0, configs: [] };
+  customElements.define("fake-stream", class extends HTMLElement {
+    constructor() {
+      super();
+      const video = document.createElement("video");
+      video.hidden = true;
+      Object.defineProperty(video, "readyState", { get: () => window.__videoReady ?? 0 });
+      this.attachShadow({ mode: "open" }).append(video, document.createElement("slot"));
+    }
+    set hass(_) {}
+    connectedCallback() { __stream.connected++; }
+    disconnectedCallback() { __stream.disconnected++; }
+  });
+  window.loadCardHelpers = async () => ({
+    createCardElement: async (cfg) => {
+      __stream.configs.push(cfg);
+      const el = document.createElement("fake-stream");
+      el.textContent = `fake stream: ${cfg.entity}`;
+      el.style.cssText = "display:flex;align-items:center;justify-content:center;aspect-ratio:16/9;background:#123;color:#8cf";
+      return el;
+    },
+  });
+
+  const THUMB = "data:image/svg+xml," + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 285">
+       <polygon points="50,205 190,265 335,190 200,135" fill="#2a2a2a"/>
+       <rect x="150" y="70" width="20" height="135" fill="#fa6831"/>
+       <polygon points="150,205 265,150 278,160 162,217" fill="#fa6831"/>
+     </svg>`);
+
+  window.__calls = [];
+  const P = "prusa_core_one";
+  const ago = (min) => new Date(Date.now() - min * 60000).toISOString();
+  const ahead = (min) => new Date(Date.now() + min * 60000).toISOString();
+  const s = (state, attributes = {}, last_changed = ago(1)) => ({ state: String(state), attributes, last_changed });
+
+  function printing() {
+    return {
+      [`sensor.${P}`]: s("printing", {}, ago(23)),
+      [`sensor.${P}_progress`]: s(2),
+      [`sensor.${P}_filename`]: s("frame_leftreartop_0.2mm_PETG_COREONE_5h53m.gcode"),
+      [`sensor.${P}_print_start`]: s(ago(23)),
+      [`sensor.${P}_print_finish`]: s(ahead(345)),
+      [`sensor.${P}_material`]: s("PETG"),
+      [`sensor.${P}_nozzle_temperature`]: s(250.4),
+      [`sensor.${P}_nozzle_target_temperature`]: s(250),
+      [`sensor.${P}_heatbed_temperature`]: s(85.1),
+      [`sensor.${P}_heatbed_target_temperature`]: s(85),
+      [`camera.${P}_preview`]: s("idle", { entity_picture: THUMB }),
+      [`button.${P}_pause_job`]: s("unknown"),
+      [`button.${P}_resume_job`]: s("unknown"),
+      [`button.${P}_continue_job`]: s("unknown"),
+      [`button.${P}_cancel_job`]: s("unknown"),
+      "camera.basement_buddy3d": s("idle"),
+      "switch.plug_01": s("on"),
+      "sensor.plug_01_power": s(106),
+    };
+  }
+  const printerSensors = (st) => Object.keys(st).filter((k) => k.startsWith(`sensor.${P}`) || k.startsWith(`camera.${P}`));
+  const SCENARIOS = {
+    printing,
+    paused: () => ({ ...printing(), [`sensor.${P}`]: s("paused") }),
+    attention: () => ({ ...printing(), [`sensor.${P}`]: s("attention"), [`sensor.${P}_progress`]: s(37), "sensor.plug_01_power": s(64) }),
+    finished_hot: () => ({
+      ...printing(), [`sensor.${P}`]: s("finished", {}, ago(3)), [`sensor.${P}_progress`]: s(100),
+      [`sensor.${P}_print_start`]: s("unavailable"), [`sensor.${P}_print_finish`]: s("unavailable"),
+      [`sensor.${P}_nozzle_temperature`]: s(78.2), [`sensor.${P}_nozzle_target_temperature`]: s(0),
+      [`sensor.${P}_heatbed_temperature`]: s(61), [`sensor.${P}_heatbed_target_temperature`]: s(0),
+      "sensor.plug_01_power": s(24),
+    }),
+    idle_cool: () => ({
+      ...printing(), [`sensor.${P}`]: s("idle"), [`sensor.${P}_progress`]: s("unavailable"),
+      [`sensor.${P}_filename`]: s("unavailable"), [`sensor.${P}_print_start`]: s("unavailable"),
+      [`sensor.${P}_print_finish`]: s("unavailable"), [`camera.${P}_preview`]: s("unavailable"),
+      [`sensor.${P}_nozzle_temperature`]: s(27), [`sensor.${P}_nozzle_target_temperature`]: s(0),
+      [`sensor.${P}_heatbed_temperature`]: s(26), [`sensor.${P}_heatbed_target_temperature`]: s(0),
+      "sensor.plug_01_power": s(9),
+    }),
+    unreachable: () => {
+      const st = printing();
+      for (const k of printerSensors(st)) st[k] = s("unavailable");
+      return st;
+    },
+    off: () => {
+      const st = SCENARIOS.unreachable();
+      st["switch.plug_01"] = s("off");
+      st["sensor.plug_01_power"] = s(0);
+      return st;
+    },
+    missing: () => {
+      const st = printing();
+      delete st[`sensor.${P}_nozzle_temperature`];
+      delete st[`sensor.${P}_heatbed_target_temperature`];
+      return st;
+    },
+    missing_state: () => {
+      const st = printing();
+      delete st[`sensor.${P}`];
+      delete st[`sensor.${P}_nozzle_temperature`];
+      return st;
+    },
+  };
+
+  const card = document.createElement("prusalink-printer-card");
+  window.card = card;
+  window.setScenario = (name) => {
+    card.hass = {
+      states: SCENARIOS[name](),
+      callService: (domain, service, data) => {
+        __calls.push([domain, service, data]);
+        document.getElementById("log").textContent = JSON.stringify(__calls, null, 1);
+      },
+    };
+  };
+  window.$c = (sel) => card.shadowRoot.querySelector(sel);
+  window.$$c = (sel) => [...card.shadowRoot.querySelectorAll(sel)];
+  window.clickAction = (action) => {
+    const el = $c(`[data-action="${action}"]`);
+    if (!el) return `no element for ${action}`;
+    el.click();
+    return el.disabled ? "disabled" : "clicked";
+  };
+
+  const controls = document.getElementById("controls");
+  for (const name of Object.keys(SCENARIOS)) {
+    const b = document.createElement("button");
+    b.textContent = name;
+    b.onclick = () => setScenario(name);
+    controls.append(b);
+  }
+
+  await import("../../prusalink-printer-card.js");
+  // The element was created before it was defined.
+  customElements.upgrade(card);
+  card.setConfig({
+    name: "Prusa CORE One", prefix: P, camera: "camera.basement_buddy3d",
+    power_switch: "switch.plug_01", power_sensor: "sensor.plug_01_power",
+  });
+  setScenario("printing");
+  document.getElementById("wrap").append(card);
+  // Screenshots need settled styles.
+  const noTransitions = document.createElement("style");
+  noTransitions.textContent = "*, *::before, *::after { transition: none !important; }";
+  card.shadowRoot.append(noTransitions);
+  window.__ready = true;
+</script>
